@@ -1,4 +1,3 @@
-# watcher.py
 import os
 import json
 import re
@@ -72,7 +71,6 @@ def fetch_quote_stooq(code: str) -> dict:
     r.raise_for_status()
     html = r.text
 
-    # よくある表記: "Last" "Prev" の近くの数値を拾う
     def pick(label_variants):
         for label in label_variants:
             m = re.search(
@@ -94,10 +92,12 @@ def fetch_quote_stooq(code: str) -> dict:
 
 
 # ----------------------------
-# LINE notify (Broadcast)
+# LINE Messaging API (Broadcast)
 # ----------------------------
 def send_line_broadcast(text: str):
-    # Secrets からトークン取得（Bearerは付けない）
+    """
+    user_id不要。友だち追加している全員に配信（1人でもOK）
+    """
     token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
     if not token:
         raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です（GitHub Secrets）")
@@ -115,8 +115,6 @@ def send_line_broadcast(text: str):
     return True
 
 
-
-
 # ----------------------------
 # main logic
 # ----------------------------
@@ -131,6 +129,12 @@ def should_notify(state: dict, key: str, now: datetime, cooldown_minutes: int) -
 def main():
     ensure_state_file()
 
+    # ✅ TEST_LINE=1 のときは、設定や時間を無視して必ず送る（迷子防止）
+    if os.getenv("TEST_LINE", "0") == "1":
+        send_line_broadcast("✅ stock-alert テスト通知（TEST_LINE=1）")
+        print("sent: test message")
+        return
+
     cfg = load_json(CONFIG_FILE, {})
     watch = cfg.get("watch", {})
     if not watch:
@@ -139,13 +143,6 @@ def main():
 
     now = datetime.now(JST)
     sess = session_type(now)
-
-    # TEST_LINE=1 のときは条件無視で必ず送信
-    test_line = os.getenv("TEST_LINE", "0") == "1"
-    if test_line:
-        send_line_broadcast("✅ stock-alert テスト通知（TEST_LINE=1）")
-        print("sent: test message")
-        return
 
     if sess == "off":
         print("off time")
@@ -159,8 +156,10 @@ def main():
 
     for code, meta in watch.items():
         name = meta.get("name", code)
-        pct = float(meta.get("percent_market", default_market) if sess == "market"
-                    else meta.get("percent_pts", default_pts))
+        pct = float(
+            meta.get("percent_market", default_market) if sess == "market"
+            else meta.get("percent_pts", default_pts)
+        )
 
         q = fetch_quote_stooq(code)
         last = q["last"]
