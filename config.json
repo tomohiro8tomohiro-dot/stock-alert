@@ -1,7 +1,7 @@
 {
   "cooldown_minutes": 360,
-  "default_percent_market": 2.0,
-  "default_percent_pts": 2.0,
+  "default_percent_market": 10.0,
+  "default_percent_pts": 10.0,
   "watch": {
     "7203": { "name": "トヨタ" }
   }
