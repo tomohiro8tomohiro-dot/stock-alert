@@ -1,0 +1,14 @@
+{
+  "default_percent": 10,
+  "time_rules": {
+    "market_open": "09:00",
+    "market_close": "15:00",
+    "use_pts_after_close": true
+  },
+  "watch": {
+    "7203": { "name": "トヨタ", "percent_market": 10, "percent_pts": 10 },
+    "9984": { "name": "ソフトバンクG", "percent_market": 10, "percent_pts": 8 }
+  },
+  "cooldown_minutes": 360,
+  "quote_source": "stooq"
+}
