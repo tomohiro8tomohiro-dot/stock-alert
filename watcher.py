@@ -1,4 +1,9 @@
 import os, json, time, re
+import os
+
+TEST_LINE = os.getenv("TEST_LINE", "0") == "1"
+
+
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import requests
@@ -155,3 +160,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+if TEST_LINE:
+    send_line("✅ stock-alert テスト通知（条件無視）")
+    print("sent: test message to LINE")
