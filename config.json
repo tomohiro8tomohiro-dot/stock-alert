@@ -3,7 +3,6 @@
   "default_percent_market": 2.0,
   "default_percent_pts": 2.0,
   "watch": {
-    "7203": { "name": "トヨタ" },
-    "9984": { "name": "ソフトバンクG" }
+    "7203": { "name": "トヨタ" }
   }
 }
