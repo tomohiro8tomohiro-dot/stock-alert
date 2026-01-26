@@ -178,6 +178,7 @@ def main():
                 state["day_close"][code] = {"date": today, "close": last}
                 save_json(STATE_FILE, state)
                 print("saved day_close (market):", code, last)
+        saved = state["day_close"][code]
 
         if sess == "pts":
             if saved is None or saved.get("date") != today:
