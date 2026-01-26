@@ -97,6 +97,7 @@ def fetch_quote_stooq(code: str) -> dict:
 # LINE notify (Broadcast)
 # ----------------------------
 def send_line_broadcast(text: str):
+    # Secrets からトークン取得（Bearerは付けない）
     token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
     if not token:
         raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です（GitHub Secrets）")
@@ -107,10 +108,12 @@ def send_line_broadcast(text: str):
         "Content-Type": "application/json",
     }
     payload = {"messages": [{"type": "text", "text": text}]}
+
     r = requests.post(url, headers=headers, json=payload, timeout=20)
     if r.status_code >= 400:
         raise RuntimeError(f"LINE送信失敗: {r.status_code} {r.text}")
     return True
+
 
 
 
