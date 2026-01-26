@@ -159,7 +159,8 @@ def main():
             print("no:", code, last, threshold)
 
 if __name__ == "__main__":
-    main()
-if TEST_LINE:
-    send_line("✅ stock-alert テスト通知（条件無視）")
-    print("sent: test message to LINE")
+    if TEST_LINE:
+        send_line("✅ stock-alert テスト通知（条件無視）")
+        print("sent: test message to LINE")
+    else:
+        main()
