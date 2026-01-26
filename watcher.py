@@ -1,145 +1,172 @@
-import os, json, time, re
+# watcher.py
 import os
-
-TEST_LINE = os.getenv("TEST_LINE", "0") == "1"
-
-
+import json
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+
 import requests
 
 JST = ZoneInfo("Asia/Tokyo")
 STATE_FILE = "state.json"
+CONFIG_FILE = "config.json"
 
-def load_json(path, default):
+
+# ----------------------------
+# util
+# ----------------------------
+def load_json(path: str, default):
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
         return default
 
-def save_json(path, obj):
+
+def save_json(path: str, obj):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
-def is_weekday(dt_jst: datetime) -> bool:
-    return dt_jst.weekday() < 5  # 0=Mon
 
-def parse_hhmm(s: str):
-    hh, mm = s.split(":")
-    return int(hh), int(mm)
+def ensure_state_file():
+    if not os.path.exists(STATE_FILE):
+        save_json(STATE_FILE, {})
 
-def in_time_range(dt_jst: datetime, start_hm: str, end_hm: str) -> bool:
-    sh, sm = parse_hhmm(start_hm)
-    eh, em = parse_hhmm(end_hm)
-    start = dt_jst.replace(hour=sh, minute=sm, second=0, microsecond=0)
-    end = dt_jst.replace(hour=eh, minute=em, second=0, microsecond=0)
-    return start <= dt_jst < end
 
-def session_type(dt_jst: datetime, cfg) -> str:
-    tr = cfg["time_rules"]
-    if not is_weekday(dt_jst):
+def is_weekday(dt: datetime) -> bool:
+    return dt.weekday() < 5  # 0=Mon ... 4=Fri
+
+
+def in_range(dt: datetime, start_h: int, start_m: int, end_h: int, end_m: int) -> bool:
+    s = dt.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+    e = dt.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+    return s <= dt < e
+
+
+def session_type(now: datetime) -> str:
+    """
+    market: 09:00-15:00 (JST)
+    pts   : 15:00-23:00 (JST)  ※データソースはPTS含まない可能性あり
+    off   : それ以外
+    """
+    if not is_weekday(now):
         return "off"
-    if in_time_range(dt_jst, tr["market_open"], tr["market_close"]):
+    if in_range(now, 9, 0, 15, 0):
         return "market"
-    if tr.get("use_pts_after_close", False) and dt_jst.hour <= 23:
-        # 15:00以降はPTS扱い（ただし価格データがPTSを含むかはソース依存）
-        if dt_jst.hour > 15 or (dt_jst.hour == 15 and dt_jst.minute >= 0):
-            return "pts"
+    if in_range(now, 15, 0, 23, 0):
+        return "pts"
     return "off"
 
-# --- 価格取得（無料の一般ソースとして Stooq を使用）---
-# 注意：この価格がPTSを含むかは保証できません（将来差し替え可能にしてあります）
-def fetch_quote_stooq(code: str):
-    # Stooqは .jp が使えることが多い（例 7203.jp）
+
+# ----------------------------
+# Quote (Stooq)
+# ----------------------------
+def fetch_quote_stooq(code: str) -> dict:
+    """
+    StooqのHTMLから「現在値（Last）」と「前日終値（Prev）」を拾う。
+    取れなかったら例外。
+    """
     symbol = f"{code}.jp"
     url = f"https://stooq.com/q/?s={symbol}"
-    r = requests.get(url, timeout=20, headers={"User-Agent":"Mozilla/5.0"})
+    r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
     r.raise_for_status()
     html = r.text
 
-    # 現在値（Last）と前日終値（Prev.）っぽい数値を拾う（サイト構造変更に弱いので保険付き）
-    def find_value(label):
-        # labelの次に出てくる数値っぽいものを拾う（ゆるい）
-        m = re.search(rf"{re.escape(label)}.*?([0-9]+(?:\.[0-9]+)?)", html, re.IGNORECASE | re.DOTALL)
-        return float(m.group(1)) if m else None
+    # よくある表記: "Last" "Prev" の近くの数値を拾う
+    def pick(label_variants):
+        for label in label_variants:
+            m = re.search(
+                rf"{re.escape(label)}\s*</td>\s*<td[^>]*>\s*([0-9]+(?:\.[0-9]+)?)",
+                html,
+                re.IGNORECASE,
+            )
+            if m:
+                return float(m.group(1))
+        return None
 
-    last = find_value("Last") or find_value("Close")  # どちらか取れれば
-    prev = find_value("Prev") or find_value("Prev.") or find_value("Previous")
+    last = pick(["Last", "Close"])
+    prev = pick(["Prev", "Prev.", "Previous"])
 
     if last is None or prev is None:
-        raise RuntimeError(f"価格取得に失敗: {code} (last={last}, prev={prev})")
+        raise RuntimeError(f"価格取得に失敗しました: {code}（last={last}, prev={prev}）")
 
     return {"last": last, "prev_close": prev, "source": "stooq"}
 
-def get_quote(code: str, cfg):
-    src = cfg.get("quote_source", "stooq")
-    if src == "stooq":
-        return fetch_quote_stooq(code)
-    raise RuntimeError(f"未対応のquote_source: {src}")
 
-# --- LINE通知（Messaging API Push）---
-def send_line(text: str):
+# ----------------------------
+# LINE notify (Broadcast)
+# ----------------------------
+def send_line_broadcast(text: str):
+    """
+    user_id不要。友だち追加している全員に配信（1人でもOK）
+    """
     token = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
-    user_id = os.environ["LINE_USER_ID"]
-    url = "https://api.line.me/v2/bot/message/push"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"to": user_id, "messages": [{"type":"text", "text": text}]}
-    r = requests.post(url, headers=headers, json=payload, timeout=20)
-    r.raise_for_status()
-
-# --- Mailgun通知（sandbox推奨）---
-def send_mailgun(subject: str, text: str):
-    api_key = os.environ["MAILGUN_API_KEY"]
-    domain = os.environ["MAILGUN_DOMAIN"]     # 例: sandboxXXXX.mailgun.org
-    mail_to = os.environ["MAIL_TO"]           # あなたのメール（事前承認が必要）
-    mail_from = os.environ.get("MAIL_FROM", f"Stock Alert <postmaster@{domain}>")
-
-    url = f"https://api.mailgun.net/v3/{domain}/messages"
-    data = {
-        "from": mail_from,
-        "to": [mail_to],
-        "subject": subject,
-        "text": text
+    url = "https://api.line.me/v2/bot/message/broadcast"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
     }
-    r = requests.post(url, auth=("api", api_key), data=data, timeout=20)
-    r.raise_for_status()
+    payload = {"messages": [{"type": "text", "text": text}]}
+    r = requests.post(url, headers=headers, json=payload, timeout=20)
+    # 失敗したら理由が欲しいので本文も出す
+    if r.status_code >= 400:
+        raise RuntimeError(f"LINE送信失敗: {r.status_code} {r.text}")
+    return True
 
-def percent_for(code: str, sess: str, cfg) -> float:
-    w = cfg["watch"].get(code, {})
-    if sess == "market":
-        return float(w.get("percent_market", w.get("percent", cfg["default_percent"])))
-    if sess == "pts":
-        return float(w.get("percent_pts", w.get("percent", cfg["default_percent"])))
-    return float(cfg["default_percent"])
 
-def should_notify(state, code: str, now_jst: datetime, cooldown_minutes: int) -> bool:
-    last_sent = state.get(code)
-    if not last_sent:
+# ----------------------------
+# main logic
+# ----------------------------
+def should_notify(state: dict, key: str, now: datetime, cooldown_minutes: int) -> bool:
+    last = state.get(key)
+    if not last:
         return True
-    last_dt = datetime.fromisoformat(last_sent).replace(tzinfo=JST)
-    return (now_jst - last_dt) >= timedelta(minutes=cooldown_minutes)
+    last_dt = datetime.fromisoformat(last).replace(tzinfo=JST)
+    return (now - last_dt) >= timedelta(minutes=cooldown_minutes)
+
 
 def main():
-    cfg = load_json("config.json", {})
+    ensure_state_file()
+
+    cfg = load_json(CONFIG_FILE, {})
+    watch = cfg.get("watch", {})
+    if not watch:
+        print("watch が空です。config.json に watch を入れてください。")
+        return
+
     now = datetime.now(JST)
-    sess = session_type(now, cfg)
+    sess = session_type(now)
+
+    # TEST_LINE=1 のときは条件無視で必ず送信
+    test_line = os.getenv("TEST_LINE", "0") == "1"
+    if test_line:
+        send_line_broadcast("✅ stock-alert テスト通知（TEST_LINE=1）")
+        print("sent: test message")
+        return
+
     if sess == "off":
         print("off time")
         return
 
-    state = load_json(STATE_FILE, {})
     cooldown = int(cfg.get("cooldown_minutes", 360))
+    default_market = float(cfg.get("default_percent_market", 2.0))
+    default_pts = float(cfg.get("default_percent_pts", 2.0))
 
-    for code, meta in cfg["watch"].items():
+    state = load_json(STATE_FILE, {})
+
+    for code, meta in watch.items():
         name = meta.get("name", code)
-        q = get_quote(code, cfg)
+        pct = float(meta.get("percent_market", default_market) if sess == "market"
+                    else meta.get("percent_pts", default_pts))
+
+        q = fetch_quote_stooq(code)
         last = q["last"]
         prev = q["prev_close"]
-        pct = percent_for(code, sess, cfg)
-        threshold = prev * (1.0 + pct/100.0)
+        threshold = prev * (1.0 + pct / 100.0)
 
-        if last >= threshold and should_notify(state, code, now, cooldown):
+        state_key = f"{code}:{sess}:{pct}"
+
+        if last >= threshold and should_notify(state, state_key, now, cooldown):
             tag = "📈【市場】" if sess == "market" else "🌙【PTS】"
             msg = (
                 f"{tag}\n"
@@ -149,18 +176,13 @@ def main():
                 f"+{pct}% 到達\n"
                 f"(source: {q['source']})"
             )
-            send_line(msg)
-            send_mailgun(f"【株価通知】{code} +{pct}% 到達（{ '市場' if sess=='market' else 'PTS' }）", msg)
-
-            state[code] = now.isoformat()
+            send_line_broadcast(msg)
+            state[state_key] = now.isoformat()
             save_json(STATE_FILE, state)
-            print("notified:", code)
+            print("notified:", code, last, ">=", threshold)
         else:
-            print("no:", code, last, threshold)
+            print("no:", code, last, "<", threshold)
+
 
 if __name__ == "__main__":
-    if TEST_LINE:
-        send_line("✅ stock-alert テスト通知（条件無視）")
-        print("sent: test message to LINE")
-    else:
-        main()
+    main()
