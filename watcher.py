@@ -153,6 +153,7 @@ def main():
     default_pts = float(cfg.get("default_percent_pts", 2.0))
 
     state = load_json(STATE_FILE, {})
+state.setdefault("day_close", {})
 
     for code, meta in watch.items():
         name = meta.get("name", code)
@@ -164,7 +165,16 @@ def main():
         q = fetch_quote_stooq(code)
         last = q["last"]
         prev = q["prev_close"]
-        threshold = prev * (1.0 + pct / 100.0)
+
+if sess == "pts":
+    base = state.get("day_close", {}).get(code, {}).get("close")
+    if base is None:
+        print("no day close yet:", code)
+        continue
+    threshold = base * (1.0 + pct / 100.0)
+else:
+    threshold = prev * (1.0 + pct / 100.0)
+
 
         state_key = f"{code}:{sess}:{pct}"
 
