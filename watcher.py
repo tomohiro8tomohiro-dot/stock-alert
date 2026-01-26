@@ -129,7 +129,7 @@ def should_notify(state: dict, key: str, now: datetime, cooldown_minutes: int) -
 def main():
     ensure_state_file()
 
-    # ✅ TEST_LINE=1 のときは、設定や時間を無視して必ず送る（迷子防止）
+    # TEST_LINE=1 のときは無条件で送る（確認用）
     if os.getenv("TEST_LINE", "0") == "1":
         send_line_broadcast("✅ stock-alert テスト通知（TEST_LINE=1）")
         print("sent: test message")
@@ -150,10 +150,11 @@ def main():
 
     cooldown = int(cfg.get("cooldown_minutes", 360))
     default_market = float(cfg.get("default_percent_market", 2.0))
-    default_pts = float(cfg.get("default_percent_pts", 2.0))
+    default_pts = float(cfg.get("default_percent_pts", 10.0))  # ← PTSのデフォルトは10%推奨
 
     state = load_json(STATE_FILE, {})
-state.setdefault("day_close", {})
+    state.setdefault("day_close", {})  # 日中終値の保存場所
+    today = now.date().isoformat()
 
     for code, meta in watch.items():
         name = meta.get("name", code)
@@ -166,15 +167,39 @@ state.setdefault("day_close", {})
         last = q["last"]
         prev = q["prev_close"]
 
-if sess == "pts":
-    base = state.get("day_close", {}).get(code, {}).get("close")
-    if base is None:
-        print("no day close yet:", code)
-        continue
-    threshold = base * (1.0 + pct / 100.0)
-else:
-    threshold = prev * (1.0 + pct / 100.0)
+        # ----------------------------
+        # 日中終値（今日の引け値）を保存
+        # ・marketの14:55〜14:59で1回保存
+        # ・もし保存できてないままPTSに入ったら、その時点の last を日中終値として保存（最悪の保険）
+        # ----------------------------
+        saved = state["day_close"].get(code)
+        if sess == "market" and now.hour == 14 and now.minute >= 55:
+            if saved is None or saved.get("date") != today:
+                state["day_close"][code] = {"date": today, "close": last}
+                save_json(STATE_FILE, state)
+                print("saved day_close (market):", code, last)
 
+        if sess == "pts":
+            if saved is None or saved.get("date") != today:
+                # market終盤に走らなかった等の保険：PTS突入時の last を日中終値扱いで保存
+                state["day_close"][code] = {"date": today, "close": last}
+                save_json(STATE_FILE, state)
+                saved = state["day_close"][code]
+                print("saved day_close (pts fallback):", code, last)
+
+        # ----------------------------
+        # しきい値計算
+        # market: 前日終値ベース
+        # pts   : 日中終値ベース（ここが要望）
+        # ----------------------------
+        if sess == "pts":
+            base = state["day_close"][code]["close"]
+            threshold = base * (1.0 + pct / 100.0)
+            base_label = "日中終値"
+        else:
+            base = prev
+            threshold = prev * (1.0 + pct / 100.0)
+            base_label = "前日終値"
 
         state_key = f"{code}:{sess}:{pct}"
 
@@ -183,7 +208,7 @@ else:
             msg = (
                 f"{tag}\n"
                 f"{code} {name}\n"
-                f"前日終値: {prev}\n"
+                f"{base_label}: {base}\n"
                 f"現在値: {last}\n"
                 f"+{pct}% 到達\n"
                 f"(source: {q['source']})"
