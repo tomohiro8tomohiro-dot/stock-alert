@@ -97,10 +97,10 @@ def fetch_quote_stooq(code: str) -> dict:
 # LINE notify (Broadcast)
 # ----------------------------
 def send_line_broadcast(text: str):
-    """
-    user_id不要。友だち追加している全員に配信（1人でもOK）
-    """
-    token = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
+    token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    if not token:
+        raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です（GitHub Secrets）")
+
     url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -108,10 +108,10 @@ def send_line_broadcast(text: str):
     }
     payload = {"messages": [{"type": "text", "text": text}]}
     r = requests.post(url, headers=headers, json=payload, timeout=20)
-    # 失敗したら理由が欲しいので本文も出す
     if r.status_code >= 400:
         raise RuntimeError(f"LINE送信失敗: {r.status_code} {r.text}")
     return True
+
 
 
 # ----------------------------
