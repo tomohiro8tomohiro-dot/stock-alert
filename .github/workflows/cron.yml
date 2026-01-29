@@ -8,22 +8,15 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
-
-      # ★ここに追加（state.json を前回から復元）
-      - name: Restore state cache
-        uses: actions/cache/restore@v4
-        with:
-          path: state.json
-          key: state-${{ github.run_id }}
-          restore-keys: |
-            state-
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
@@ -33,19 +26,7 @@ jobs:
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          LINE_TEST: "1"
+          # テスト送信したい時だけ次の行の # を消す（普段は消さない）
+          # LINE_TEST: "1"
         run: |
           python watcher.py
-
-
-     
-
-      
-      
-
-      # ★ここに追加（今回の state.json を保存）
-      - name: Save state cache
-        uses: actions/cache/save@v4
-        with:
-          path: state.json
-          key: state-${{ github.run_id }}
