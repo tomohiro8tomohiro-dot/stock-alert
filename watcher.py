@@ -223,4 +223,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import os
+    if os.getenv("LINE_TEST", "") == "1":
+        send_line_broadcast("✅ LINEテスト: GitHub Actions から送信できています")
+        print("LINE_TEST: sent")
+    else:
+        main()
+
