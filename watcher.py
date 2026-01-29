@@ -1,7 +1,5 @@
-
 import os
 import json
-import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -46,7 +44,7 @@ def in_range(dt: datetime, start_h: int, start_m: int, end_h: int, end_m: int) -
 def session_type(now: datetime) -> str:
     """
     market: 09:00-15:00 (JST)
-    pts   : 15:00-23:00 (JST)  ※データソースはPTS含まない可能性あり
+    pts   : 15:00-23:00 (JST)
     off   : それ以外
     """
     if not is_weekday(now):
@@ -59,22 +57,21 @@ def session_type(now: datetime) -> str:
 
 
 # ----------------------------
-# Quote (Stooq)
+# Quote (Stooq daily CSV)
 # ----------------------------
 def fetch_quote_stooq(code: str):
     """
     Stooq（日足CSV）から直近2本の終値を取得
-    last = 最新日の終値
+    last       = 最新日の終値（Stooq日足のClose）
     prev_close = その1つ前の終値
     """
     sym = f"{code}.jp"
-    url = f"https://stooq.com/q/d/l/?s={sym}&i=d"  # CSV（日足）
+    url = f"https://stooq.com/q/d/l/?s={sym}&i=d"
     try:
         r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
 
         lines = [ln.strip() for ln in r.text.splitlines() if ln.strip()]
-        # ヘッダー + データ2行以上が必要
         if len(lines) < 3:
             print("fetch error", code, "not enough data")
             return None
@@ -82,8 +79,8 @@ def fetch_quote_stooq(code: str):
         row_prev = lines[-2].split(",")
         row_last = lines[-1].split(",")
 
-        prev_close = float(row_prev[4])  # Close列
-        last = float(row_last[4])        # Close列
+        prev_close = float(row_prev[4])  # Close
+        last = float(row_last[4])        # Close
 
         return {"last": last, "prev_close": prev_close, "source": "stooq-daily"}
     except Exception as e:
@@ -116,7 +113,7 @@ def send_line_broadcast(text: str):
 
 
 # ----------------------------
-# main logic
+# notify gate
 # ----------------------------
 def should_notify(state: dict, key: str, now: datetime, cooldown_minutes: int) -> bool:
     last = state.get(key)
@@ -126,10 +123,11 @@ def should_notify(state: dict, key: str, now: datetime, cooldown_minutes: int) -
     return (now - last_dt) >= timedelta(minutes=cooldown_minutes)
 
 
+# ----------------------------
+# main
+# ----------------------------
 def main():
     ensure_state_file()
-
-    
 
     cfg = load_json(CONFIG_FILE, {})
     watch = cfg.get("watch", {})
@@ -145,8 +143,8 @@ def main():
         return
 
     cooldown = int(cfg.get("cooldown_minutes", 360))
-    default_market = float(cfg.get("default_percent_market", 2.0))
-    default_pts = float(cfg.get("default_percent_pts", 10.0))  # ← PTSのデフォルトは10%推奨
+    default_market = float(cfg.get("default_percent_market", 10.0))
+    default_pts = float(cfg.get("default_percent_pts", 10.0))
 
     state = load_json(STATE_FILE, {})
     state.setdefault("day_close", {})  # 日中終値の保存場所
@@ -154,6 +152,7 @@ def main():
 
     for code, meta in watch.items():
         name = meta.get("name", code)
+
         pct = float(
             meta.get("percent_market", default_market) if sess == "market"
             else meta.get("percent_pts", default_pts)
@@ -163,40 +162,30 @@ def main():
         if not q:
             print("skip:", code, "quote unavailable")
             continue
+
         last = q["last"]
         prev = q["prev_close"]
 
-        # ----------------------------
-        # 日中終値（今日の引け値）を保存
-        # ・marketの14:55〜14:59で1回保存
-        # ・もし保存できてないままPTSに入ったら、その時点の last を日中終値として保存（最悪の保険）
-        # ----------------------------
+        # --- day_close 保存（market終盤で保存 / PTS突入時に保険で保存） ---
         saved = state["day_close"].get(code)
+
+        # marketの14:55〜14:59で1回保存
         if sess == "market" and now.hour == 14 and now.minute >= 55:
             if saved is None or saved.get("date") != today:
                 state["day_close"][code] = {"date": today, "close": last}
                 save_json(STATE_FILE, state)
                 print("saved day_close (market):", code, last)
+
         saved = state["day_close"].get(code)
-                   if sess == "pts" and (saved is None or saved.get("date") != today):
-                       # market終盤に走らなかった等の保険：PTS突入時の last を日中終値扱いで保存
-                       state["day_close"][code] = {"date": today, "close": last}
-                       save_json(STATE_FILE, state)
-                       saved = state["day_close"].get(code)
-                       print("saved day_close (pts fallback):", code, last)
 
-        
-                # market終盤に走らなかった等の保険：PTS突入時の last を日中終値扱いで保存
-                state["day_close"][code] = {"date": today, "close": last}
-                save_json(STATE_FILE, state)
-                saved = state["day_close"].get(code)
-                print("saved day_close (pts fallback):", code, last)
+        # PTSに入ったとき、今日のday_closeが無ければ作る（保険）
+        if sess == "pts" and (saved is None or saved.get("date") != today):
+            state["day_close"][code] = {"date": today, "close": last}
+            save_json(STATE_FILE, state)
+            saved = state["day_close"].get(code)
+            print("saved day_close (pts fallback):", code, last)
 
-        # ----------------------------
-        # しきい値計算
-        # market: 前日終値ベース
-        # pts   : 日中終値ベース（ここが要望）
-        # ----------------------------
+        # --- threshold ---
         if sess == "pts":
             base = saved["close"]
             threshold = base * (1.0 + pct / 100.0)
@@ -226,17 +215,10 @@ def main():
             print("no:", code, last, "<", threshold)
 
 
-
-
-
-
 if __name__ == "__main__":
+    # テストしたいときだけ、GitHub Actions側で env に LINE_TEST=1 を入れる
     if os.getenv("LINE_TEST", "") == "1":
         send_line_broadcast("✅ LINEテスト: GitHub Actions から送信できています")
         print("LINE_TEST: sent")
     else:
         main()
-
-
-
-
