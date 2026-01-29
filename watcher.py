@@ -178,14 +178,14 @@ def main():
                 state["day_close"][code] = {"date": today, "close": last}
                 save_json(STATE_FILE, state)
                 print("saved day_close (market):", code, last)
-        saved = state["day_close"][code]
+        saved = state["day_close"].get(code)
 
         if sess == "pts":
             if saved is None or saved.get("date") != today:
                 # market終盤に走らなかった等の保険：PTS突入時の last を日中終値扱いで保存
                 state["day_close"][code] = {"date": today, "close": last}
                 save_json(STATE_FILE, state)
-                saved = state["day_close"][code]
+                saved = state["day_close"].get(code)
                 print("saved day_close (pts fallback):", code, last)
 
         # ----------------------------
@@ -194,7 +194,7 @@ def main():
         # pts   : 日中終値ベース（ここが要望）
         # ----------------------------
         if sess == "pts":
-            base = state["day_close"][code]["close"]
+            base = saved["close"]
             threshold = base * (1.0 + pct / 100.0)
             base_label = "日中終値"
         else:
