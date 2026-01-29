@@ -32,7 +32,7 @@ def ensure_state_file():
 
 
 def is_weekday(dt: datetime) -> bool:
-    return dt.weekday() < 5  # 0=Mon ... 4=Fri
+    return dt.weekday() < 5
 
 
 def in_range(dt: datetime, start_h: int, start_m: int, end_h: int, end_m: int) -> bool:
@@ -43,55 +43,46 @@ def in_range(dt: datetime, start_h: int, start_m: int, end_h: int, end_m: int) -
 
 def session_type(now: datetime) -> str:
     """
-    market: 09:00-15:00 (JST)
-    pts   : 15:00-23:00 (JST)
-    off   : それ以外
+    market only (JST): 09:00-15:00
+    off: otherwise
     """
     if not is_weekday(now):
         return "off"
     if in_range(now, 9, 0, 15, 0):
         return "market"
-    if in_range(now, 15, 0, 23, 0):
-        return "pts"
     return "off"
 
 
 # ----------------------------
-# Quote (Yahoo Finance 非公式エンドポイント)
+# Quote (Stooq quote CSV: free, "near real-time")
 # ----------------------------
-def fetch_quote_yahoo(code: str):
+def fetch_quote_stooq(code: str):
     """
-    Yahoo Financeの quote から
-    - regularMarketPrice
-    - postMarketPrice (あれば)
-    - regularMarketPreviousClose
-    を取得
+    Stooq quote CSV
+    last      : Close（現在値に近い値として扱う）
+    prev_close: PrevClose（前日終値）
     """
-    sym = f"{code}.T"  # 東証は .T
-    url = "https://query1.finance.yahoo.com/v7/finance/quote"
-    params = {"symbols": sym}
+    sym = f"{code}.jp"
+    url = f"https://stooq.com/q/l/?s={sym}&f=sd2t2ohlcv&h&e=csv"
     try:
-        r = requests.get(url, params=params, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
-        data = r.json()
-        result = (data.get("quoteResponse", {}) or {}).get("result", []) or []
-        if not result:
+
+        lines = [ln.strip() for ln in r.text.splitlines() if ln.strip()]
+        if len(lines) < 2:
+            print("fetch error", code, "not enough data")
             return None
 
-        q = result[0]
-        regular = q.get("regularMarketPrice")
-        post = q.get("postMarketPrice")
-        prev_close = q.get("regularMarketPreviousClose")
+        headers = lines[0].split(",")
+        values = lines[1].split(",")
+        row = dict(zip(headers, values))
 
-        # 数値が取れないときはNoneのまま返す
-        return {
-            "regular": float(regular) if regular is not None else None,
-            "post": float(post) if post is not None else None,
-            "prev_close": float(prev_close) if prev_close is not None else None,
-            "source": "yahoo-quote",
-        }
+        last = float(row["Close"])
+        prev_close = float(row["PrevClose"])
+
+        return {"last": last, "prev_close": prev_close, "source": "stooq-quote"}
     except Exception as e:
-        print("fetch error (yahoo)", code, e)
+        print("fetch error", code, e)
         return None
 
 
@@ -130,7 +121,7 @@ def should_notify(state: dict, key: str, now: datetime, cooldown_minutes: int) -
 def main():
     ensure_state_file()
 
-    # LINE_TEST=1 のときだけテスト送信（運用時は送らない）
+    # テスト送信（必要なときだけ）
     if os.getenv("LINE_TEST", "") == "1":
         send_line_broadcast("✅ LINEテスト: stock-alert から送信できています")
         print("LINE_TEST: sent")
@@ -143,59 +134,69 @@ def main():
         return
 
     now = datetime.now(JST)
-    sess = session_type(now)
-    if sess == "off":
-        print("off time")
+    if session_type(now) == "off":
+        print("off time (market only)")
         return
 
     cooldown = int(cfg.get("cooldown_minutes", 360))
-    default_market = float(cfg.get("default_percent_market", 2.0))
-    default_pts = float(cfg.get("default_percent_pts", 10.0))
+
+    # 上昇/下落 どちらも10%をデフォルトに
+    default_up = float(cfg.get("default_percent_up", 10.0))
+    default_down = float(cfg.get("default_percent_down", 10.0))
 
     state = load_json(STATE_FILE, {})
 
     for code, meta in watch.items():
         name = meta.get("name", code)
-        pct = float(
-            meta.get("percent_market", default_market) if sess == "market"
-            else meta.get("percent_pts", default_pts)
-        )
+        up_pct = float(meta.get("percent_up", default_up))
+        down_pct = float(meta.get("percent_down", default_down))
 
-        q = fetch_quote_yahoo(code)
+        q = fetch_quote_stooq(code)
         if not q:
             print("skip:", code, "quote unavailable")
             continue
 
-        # 市場: regular を使う / PTS: post があれば優先
-        last = q["regular"] if sess == "market" else (q["post"] if q["post"] is not None else q["regular"])
+        last = q["last"]
         prev = q["prev_close"]
 
-        if last is None or prev is None:
-            print("skip:", code, "missing price/prev_close", q)
-            continue
+        up_th = prev * (1.0 + up_pct / 100.0)
+        down_th = prev * (1.0 - down_pct / 100.0)
 
-        base = prev
-        threshold = base * (1.0 + pct / 100.0)
-        base_label = "前日終値"
-
-        state_key = f"{code}:{sess}:{pct}"
-
-        if last >= threshold and should_notify(state, state_key, now, cooldown):
-            tag = "📈【市場】" if sess == "market" else "🌙【PTS】"
+        # 上昇通知
+        up_key = f"{code}:market:up:{up_pct}"
+        if last >= up_th and should_notify(state, up_key, now, cooldown):
             msg = (
-                f"{tag}\n"
+                f"📈【市場 上昇】\n"
                 f"{code} {name}\n"
-                f"{base_label}: {base}\n"
+                f"前日終値: {prev}\n"
                 f"現在値: {last}\n"
-                f"+{pct}% 到達\n"
+                f"+{up_pct}% 到達\n"
                 f"(source: {q['source']})"
             )
             send_line_broadcast(msg)
-            state[state_key] = now.isoformat()
+            state[up_key] = now.isoformat()
             save_json(STATE_FILE, state)
-            print("notified:", code, last, ">=", threshold)
+            print("notified UP:", code, last, ">=", up_th)
         else:
-            print("no:", code, last, "<", threshold)
+            print("no UP:", code, last, "<", up_th)
+
+        # 下落通知
+        down_key = f"{code}:market:down:{down_pct}"
+        if last <= down_th and should_notify(state, down_key, now, cooldown):
+            msg = (
+                f"📉【市場 下落】\n"
+                f"{code} {name}\n"
+                f"前日終値: {prev}\n"
+                f"現在値: {last}\n"
+                f"-{down_pct}% 到達\n"
+                f"(source: {q['source']})"
+            )
+            send_line_broadcast(msg)
+            state[down_key] = now.isoformat()
+            save_json(STATE_FILE, state)
+            print("notified DOWN:", code, last, "<=", down_th)
+        else:
+            print("no DOWN:", code, last, ">", down_th)
 
 
 if __name__ == "__main__":
