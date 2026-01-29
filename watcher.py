@@ -160,6 +160,9 @@ def main():
         )
 
         q = fetch_quote_stooq(code)
+        if not q:
+            print("skip:", code, "quote unavailable")
+            continue
         last = q["last"]
         prev = q["prev_close"]
 
@@ -175,9 +178,14 @@ def main():
                 save_json(STATE_FILE, state)
                 print("saved day_close (market):", code, last)
         saved = state["day_close"].get(code)
+                   if sess == "pts" and (saved is None or saved.get("date") != today):
+                       # market終盤に走らなかった等の保険：PTS突入時の last を日中終値扱いで保存
+                       state["day_close"][code] = {"date": today, "close": last}
+                       save_json(STATE_FILE, state)
+                       saved = state["day_close"].get(code)
+                       print("saved day_close (pts fallback):", code, last)
 
-        if sess == "pts":
-            if saved is None or saved.get("date") != today:
+        
                 # market終盤に走らなかった等の保険：PTS突入時の last を日中終値扱いで保存
                 state["day_close"][code] = {"date": today, "close": last}
                 save_json(STATE_FILE, state)
