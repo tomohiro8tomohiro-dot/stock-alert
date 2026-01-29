@@ -57,34 +57,41 @@ def session_type(now: datetime) -> str:
 
 
 # ----------------------------
-# Quote (Stooq daily CSV)
+# Quote (Yahoo Finance 非公式エンドポイント)
 # ----------------------------
-def fetch_quote_stooq(code: str):
+def fetch_quote_yahoo(code: str):
     """
-    Stooq（日足CSV）から直近2本の終値を取得
-    last       = 最新日の終値（Stooq日足のClose）
-    prev_close = その1つ前の終値
+    Yahoo Financeの quote から
+    - regularMarketPrice
+    - postMarketPrice (あれば)
+    - regularMarketPreviousClose
+    を取得
     """
-    sym = f"{code}.jp"
-    url = f"https://stooq.com/q/d/l/?s={sym}&i=d"
+    sym = f"{code}.T"  # 東証は .T
+    url = "https://query1.finance.yahoo.com/v7/finance/quote"
+    params = {"symbols": sym}
     try:
-        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        r = requests.get(url, params=params, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
-
-        lines = [ln.strip() for ln in r.text.splitlines() if ln.strip()]
-        if len(lines) < 3:
-            print("fetch error", code, "not enough data")
+        data = r.json()
+        result = (data.get("quoteResponse", {}) or {}).get("result", []) or []
+        if not result:
             return None
 
-        row_prev = lines[-2].split(",")
-        row_last = lines[-1].split(",")
+        q = result[0]
+        regular = q.get("regularMarketPrice")
+        post = q.get("postMarketPrice")
+        prev_close = q.get("regularMarketPreviousClose")
 
-        prev_close = float(row_prev[4])  # Close
-        last = float(row_last[4])        # Close
-
-        return {"last": last, "prev_close": prev_close, "source": "stooq-daily"}
+        # 数値が取れないときはNoneのまま返す
+        return {
+            "regular": float(regular) if regular is not None else None,
+            "post": float(post) if post is not None else None,
+            "prev_close": float(prev_close) if prev_close is not None else None,
+            "source": "yahoo-quote",
+        }
     except Exception as e:
-        print("fetch error", code, e)
+        print("fetch error (yahoo)", code, e)
         return None
 
 
@@ -92,9 +99,6 @@ def fetch_quote_stooq(code: str):
 # LINE Messaging API (Broadcast)
 # ----------------------------
 def send_line_broadcast(text: str):
-    """
-    user_id不要。友だち追加している全員に配信（1人でもOK）
-    """
     token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
     if not token:
         raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です（GitHub Secrets）")
@@ -113,7 +117,7 @@ def send_line_broadcast(text: str):
 
 
 # ----------------------------
-# notify gate
+# main logic
 # ----------------------------
 def should_notify(state: dict, key: str, now: datetime, cooldown_minutes: int) -> bool:
     last = state.get(key)
@@ -123,11 +127,14 @@ def should_notify(state: dict, key: str, now: datetime, cooldown_minutes: int) -
     return (now - last_dt) >= timedelta(minutes=cooldown_minutes)
 
 
-# ----------------------------
-# main
-# ----------------------------
 def main():
     ensure_state_file()
+
+    # LINE_TEST=1 のときだけテスト送信（運用時は送らない）
+    if os.getenv("LINE_TEST", "") == "1":
+        send_line_broadcast("✅ LINEテスト: stock-alert から送信できています")
+        print("LINE_TEST: sent")
+        return
 
     cfg = load_json(CONFIG_FILE, {})
     watch = cfg.get("watch", {})
@@ -137,63 +144,39 @@ def main():
 
     now = datetime.now(JST)
     sess = session_type(now)
-
     if sess == "off":
         print("off time")
         return
 
     cooldown = int(cfg.get("cooldown_minutes", 360))
-    default_market = float(cfg.get("default_percent_market", 10.0))
+    default_market = float(cfg.get("default_percent_market", 2.0))
     default_pts = float(cfg.get("default_percent_pts", 10.0))
 
     state = load_json(STATE_FILE, {})
-    state.setdefault("day_close", {})  # 日中終値の保存場所
-    today = now.date().isoformat()
 
     for code, meta in watch.items():
         name = meta.get("name", code)
-
         pct = float(
             meta.get("percent_market", default_market) if sess == "market"
             else meta.get("percent_pts", default_pts)
         )
 
-        q = fetch_quote_stooq(code)
+        q = fetch_quote_yahoo(code)
         if not q:
             print("skip:", code, "quote unavailable")
             continue
 
-        last = q["last"]
+        # 市場: regular を使う / PTS: post があれば優先
+        last = q["regular"] if sess == "market" else (q["post"] if q["post"] is not None else q["regular"])
         prev = q["prev_close"]
 
-        # --- day_close 保存（market終盤で保存 / PTS突入時に保険で保存） ---
-        saved = state["day_close"].get(code)
+        if last is None or prev is None:
+            print("skip:", code, "missing price/prev_close", q)
+            continue
 
-        # marketの14:55〜14:59で1回保存
-        if sess == "market" and now.hour == 14 and now.minute >= 55:
-            if saved is None or saved.get("date") != today:
-                state["day_close"][code] = {"date": today, "close": last}
-                save_json(STATE_FILE, state)
-                print("saved day_close (market):", code, last)
-
-        saved = state["day_close"].get(code)
-
-        # PTSに入ったとき、今日のday_closeが無ければ作る（保険）
-        if sess == "pts" and (saved is None or saved.get("date") != today):
-            state["day_close"][code] = {"date": today, "close": last}
-            save_json(STATE_FILE, state)
-            saved = state["day_close"].get(code)
-            print("saved day_close (pts fallback):", code, last)
-
-        # --- threshold ---
-        if sess == "pts":
-            base = saved["close"]
-            threshold = base * (1.0 + pct / 100.0)
-            base_label = "日中終値"
-        else:
-            base = prev
-            threshold = prev * (1.0 + pct / 100.0)
-            base_label = "前日終値"
+        base = prev
+        threshold = base * (1.0 + pct / 100.0)
+        base_label = "前日終値"
 
         state_key = f"{code}:{sess}:{pct}"
 
@@ -216,9 +199,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # テストしたいときだけ、GitHub Actions側で env に LINE_TEST=1 を入れる
-    if os.getenv("LINE_TEST", "") == "1":
-        send_line_broadcast("✅ LINEテスト: GitHub Actions から送信できています")
-        print("LINE_TEST: sent")
-    else:
-        main()
+    main()
