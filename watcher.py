@@ -153,6 +153,9 @@ def main():
     default_pts = float(cfg.get("default_percent_pts", 10.0))  # ← PTSのデフォルトは10%推奨
 
     state = load_json(STATE_FILE, {})
+print("STATE:", state)
+
+    
     state.setdefault("day_close", {})  # 日中終値の保存場所
     today = now.date().isoformat()
 
