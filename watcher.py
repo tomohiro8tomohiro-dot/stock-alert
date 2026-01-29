@@ -41,20 +41,13 @@ def in_range(dt: datetime, start_h: int, start_m: int, end_h: int, end_m: int) -
     return s <= dt < e
 
 
-def session_type(now: datetime) -> str:
-    """
-    market only (JST): 09:00-15:00
-    off: otherwise
-    """
-    if not is_weekday(now):
-        return "off"
-    if in_range(now, 9, 0, 15, 0):
-        return "market"
-    return "off"
+def in_market_session(now: datetime) -> bool:
+    # 市場のみ（PTSは見ない）
+    return is_weekday(now) and in_range(now, 9, 0, 15, 0)
 
 
 # ----------------------------
-# Quote (Stooq quote CSV: free, "near real-time")
+# Quote (Stooq quote CSV: free, near real-time-ish)
 # ----------------------------
 def fetch_quote_stooq(code: str):
     """
@@ -134,22 +127,24 @@ def main():
         return
 
     now = datetime.now(JST)
-    if session_type(now) == "off":
+    if not in_market_session(now):
         print("off time (market only)")
         return
 
     cooldown = int(cfg.get("cooldown_minutes", 360))
 
-    # 上昇/下落 どちらも10%をデフォルトに
-    default_up = float(cfg.get("default_percent_up", 10.0))
-    default_down = float(cfg.get("default_percent_down", 10.0))
+    # 上昇は default_percent_market、下落は default_percent_down（無ければ同じ値）
+    up_pct_default = float(cfg.get("default_percent_market", 10.0))
+    down_pct_default = float(cfg.get("default_percent_down", up_pct_default))
 
     state = load_json(STATE_FILE, {})
 
     for code, meta in watch.items():
         name = meta.get("name", code)
-        up_pct = float(meta.get("percent_up", default_up))
-        down_pct = float(meta.get("percent_down", default_down))
+
+        # 個別設定があれば優先（任意）
+        up_pct = float(meta.get("percent_market", up_pct_default))
+        down_pct = float(meta.get("percent_down", down_pct_default))
 
         q = fetch_quote_stooq(code)
         if not q:
