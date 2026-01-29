@@ -61,35 +61,34 @@ def session_type(now: datetime) -> str:
 # ----------------------------
 # Quote (Stooq)
 # ----------------------------
-def fetch_quote_stooq(code: str) -> dict:
+def fetch_quote_stooq(code: str):
     """
-    StooqのHTMLから「現在値（Last）」と「前日終値（Prev）」を拾う。
-    取れなかったら例外。
+    Stooq（日足CSV）から直近2本の終値を取得
+    last = 最新日の終値
+    prev_close = その1つ前の終値
     """
-    symbol = f"{code}.jp"
-    url = f"https://stooq.com/q/?s={symbol}"
-    r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-    r.raise_for_status()
-    html = r.text
+    sym = f"{code}.jp"
+    url = f"https://stooq.com/q/d/l/?s={sym}&i=d"  # CSV（日足）
+    try:
+        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
 
-    def pick(label_variants):
-        for label in label_variants:
-            m = re.search(
-                rf"{re.escape(label)}\s*</td>\s*<td[^>]*>\s*([0-9]+(?:\.[0-9]+)?)",
-                html,
-                re.IGNORECASE,
-            )
-            if m:
-                return float(m.group(1))
+        lines = [ln.strip() for ln in r.text.splitlines() if ln.strip()]
+        # ヘッダー + データ2行以上が必要
+        if len(lines) < 3:
+            print("fetch error", code, "not enough data")
+            return None
+
+        row_prev = lines[-2].split(",")
+        row_last = lines[-1].split(",")
+
+        prev_close = float(row_prev[4])  # Close列
+        last = float(row_last[4])        # Close列
+
+        return {"last": last, "prev_close": prev_close, "source": "stooq-daily"}
+    except Exception as e:
+        print("fetch error", code, e)
         return None
-
-    last = pick(["Last", "Close"])
-    prev = pick(["Prev", "Prev.", "Previous"])
-
-    if last is None or prev is None:
-        raise RuntimeError(f"価格取得に失敗しました: {code}（last={last}, prev={prev}）")
-
-    return {"last": last, "prev_close": prev, "source": "stooq"}
 
 
 # ----------------------------
