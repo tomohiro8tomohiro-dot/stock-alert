@@ -29,22 +29,31 @@ def send_line(msg):
     # requests.post(LINE_URL, headers=..., data=...)
     print("LINE:", msg)
 
-
 def fetch_quote_stooq(code):
     """
-    Stooq を使った簡易株価取得
+    Stooq（CSV）から安全に株価を取得
     """
-    url = f"https://stooq.com/q/l/?s={code}.jp&f=sd2t2ohlcv&h&e=json"
+    url = f"https://stooq.com/q/l/?s={code}.jp&f=sd2t2ohlcv&e=csv"
     try:
         r = requests.get(url, timeout=10)
         r.raise_for_status()
-        data = r.json()["data"][0]
-        last = float(data["c"])
-        prev = float(data["pc"])
+        lines = r.text.strip().splitlines()
+        if len(lines) < 2:
+            return None
+
+        headers = lines[0].split(",")
+        values = lines[1].split(",")
+
+        row = dict(zip(headers, values))
+
+        last = float(row["Close"])
+        prev = float(row["PrevClose"])
+
         return {"last": last, "prev_close": prev}
     except Exception as e:
         print("fetch error", code, e)
         return None
+
 
 
 # ===== main =====
