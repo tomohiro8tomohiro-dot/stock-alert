@@ -2,6 +2,7 @@
   "cooldown_minutes": 360,
   "default_percent_market": 10.0,
   "default_percent_pts": 10.0,
+  "default_percent_down": 10.0,
   "watch": {
     "1447": { "name": "ITbookホールディングス" },
     "1726": { "name": "BRホールディングス" },
