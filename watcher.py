@@ -49,31 +49,58 @@ def in_market_session(now: datetime) -> bool:
 # ----------------------------
 # Quote (Stooq quote CSV: free, near real-time-ish)
 # ----------------------------
+import csv
+import io
+
+def _parse_csv(text: str):
+    f = io.StringIO(text)
+    return list(csv.DictReader(f))
+
 def fetch_quote_stooq(code: str):
     """
-    Stooq quote CSV
-    last      : Close（現在値に近い値として扱う）
-    prev_close: PrevClose（前日終値）
+    Stooq:
+      - 現在値っぽい値: q/l の Close
+      - 前日終値      : q/d/l(日足) の 1つ前の Close
     """
     sym = f"{code}.jp"
-    url = f"https://stooq.com/q/l/?s={sym}&f=sd2t2ohlcv&h&e=csv"
-    try:
-        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
+    headers = {"User-Agent": "Mozilla/5.0"}
 
-        lines = [ln.strip() for ln in r.text.splitlines() if ln.strip()]
-        if len(lines) < 2:
-            print("fetch error", code, "not enough data")
+    try:
+        # 1) いまの値（Close）
+        url_quote = f"https://stooq.com/q/l/?s={sym}&f=sd2t2ohlcv&h&e=csv"
+        r1 = requests.get(url_quote, timeout=20, headers=headers)
+        r1.raise_for_status()
+
+        rows1 = _parse_csv(r1.text.strip())
+        if not rows1:
+            print("fetch error", code, "quote empty")
             return None
 
-        headers = lines[0].split(",")
-        values = lines[1].split(",")
-        row = dict(zip(headers, values))
+        row1 = rows1[0]
+        close_str = (row1.get("Close") or "").strip()
+        if (not close_str) or close_str in ("-", "N/A"):
+            print("fetch error", code, "quote Close missing:", row1)
+            return None
+        last = float(close_str)
 
-        last = float(row["Close"])
-        prev_close = float(row["PrevClose"])
+        # 2) 前日終値（日足の1つ前）
+        url_daily = f"https://stooq.com/q/d/l/?s={sym}&i=d"
+        r2 = requests.get(url_daily, timeout=20, headers=headers)
+        r2.raise_for_status()
 
-        return {"last": last, "prev_close": prev_close, "source": "stooq-quote"}
+        rows2 = _parse_csv(r2.text.strip())
+        if len(rows2) < 2:
+            print("fetch error", code, "daily not enough rows")
+            return None
+
+        prev_close_str = (rows2[-2].get("Close") or "").strip()
+        if (not prev_close_str) or prev_close_str in ("-", "N/A"):
+            print("fetch error", code, "daily PrevClose missing:", rows2[-2])
+            return None
+        prev_close = float(prev_close_str)
+
+        return {"last": last, "prev_close": prev_close, "source": "stooq-quote+daily"}
+
     except Exception as e:
         print("fetch error", code, e)
         return None
